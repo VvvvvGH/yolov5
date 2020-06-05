@@ -381,7 +381,7 @@ if __name__ == '__main__':
     last = wdir + 'last.pt'
     best = wdir + 'best.pt'
     results_file = wdir + 'results.txt'
-    
+
     opt.weights = last if opt.resume else opt.weights
     opt.cfg = glob.glob('./**/' + opt.cfg, recursive=True)[0]  # find file
     opt.data = glob.glob('./**/' + opt.data, recursive=True)[0]  # find file
