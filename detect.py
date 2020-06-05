@@ -13,9 +13,9 @@ def detect(save_img=False):
 
     # Initialize
     device = torch_utils.select_device(opt.device)
-    if os.path.exists(out):
-        shutil.rmtree(out)  # delete output folder
-    os.makedirs(out)  # make new output folder
+    # Don't remove dir
+    if not os.path.exists(out):
+        os.makedirs(out)  # make new output folder
 
     # Load model
     google_utils.attempt_download(weights)
