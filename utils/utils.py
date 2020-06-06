@@ -18,6 +18,7 @@ import torch.nn as nn
 import torchvision
 from scipy.signal import butter, filtfilt
 from tqdm import tqdm
+from PIL import Image, ImageDraw, ImageFont
 
 from . import torch_utils, google_utils  #  torch_utils, google_utils
 
@@ -831,6 +832,30 @@ def plot_one_box(x, img, color=None, label=None, line_thickness=None):
         c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
         cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
         cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+
+
+def plot_one_box_chs(x, img, color=None, label=None, line_thickness=None):
+    if not label or all(ord(c) < 128 for c in label):
+        plot_one_box(x, img, color, label, line_thickness)
+    else:
+        # Plots one bounding box on image img
+        tl = line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line thickness
+        color = color or [random.randint(0, 255) for _ in range(3)]
+        c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+        cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+
+        if label:
+            img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img)
+            font = ImageFont.truetype("fonts/msyhbd.ttc", 35, encoding="utf-8")
+            t_size = draw.textsize(label, font)
+            draw.rectangle([int(x[0]), int(x[1]), int(x[0]) + t_size[0], int(x[1]) - t_size[1]], width=t_size[0],
+                           fill=(color[2], color[1], color[0]))
+            left = c1[0]
+            top = c1[1] - int(t_size[1]) - 5
+            draw.text((left, top), label, (255, 255, 255), font=font)
+            return cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+    return img
 
 
 def plot_wh_methods():  # from utils.utils import *; plot_wh_methods()
