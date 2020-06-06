@@ -20,6 +20,7 @@ class Detect(nn.Module):
         self.export = False  # onnx export
 
     def forward(self, x):
+        x = x.copy()  # for profiling
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):
@@ -66,7 +67,26 @@ class Model(nn.Module):
         print('')
 
     def forward(self, x, augment=False, profile=False):
-        y, ts = [], 0  # outputs
+        if augment:
+            img_size = x.shape[-2:]  # height, width
+            s = [0.83, 0.67]  # scales
+            y = []
+            for i, xi in enumerate((x,
+                                    torch_utils.scale_img(x.flip(3), s[0]),  # flip-lr and scale
+                                    torch_utils.scale_img(x, s[1]),  # scale
+                                    )):
+                # cv2.imwrite('img%g.jpg' % i, 255 * xi[0].numpy().transpose((1, 2, 0))[:, :, ::-1])
+                y.append(self.forward_once(xi)[0])
+
+            y[1][..., :4] /= s[0]  # scale
+            y[1][..., 0] = img_size[1] - y[1][..., 0]  # flip lr
+            y[2][..., :4] /= s[1]  # scale
+            return torch.cat(y, 1), None  # augmented inference, train
+        else:
+            return self.forward_once(x, profile)  # single-scale inference, train
+
+    def forward_once(self, x, profile=False):
+        y, dt = [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -77,15 +97,14 @@ class Model(nn.Module):
                 t = torch_utils.time_synchronized()
                 for _ in range(10):
                     _ = m(x)
-                dt = torch_utils.time_synchronized() - t
-                ts += dt
-                print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt * 100, m.type))
+                dt.append((torch_utils.time_synchronized() - t) * 100)
+                print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
 
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
 
         if profile:
-            print(ts * 100)
+            print('%.1fms total' % sum(dt))
         return x
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
