@@ -45,13 +45,18 @@ class Detect(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, model_yaml='yolov5s.yaml'):  # cfg, number of classes, depth-width gains
+    def __init__(self, model_cfg='yolov5s.yaml', ch=3, nc=None):  # model, input channels, number of classes
         super(Model, self).__init__()
-        with open(model_yaml) as f:
-            self.md = yaml.load(f, Loader=yaml.FullLoader)  # model dict
+        if type(model_cfg) is dict:
+            self.md = model_cfg  # model dict
+        else:  # is *.yaml
+            with open(model_cfg) as f:
+                self.md = yaml.load(f, Loader=yaml.FullLoader)  # model dict
 
         # Define model
-        self.model, self.save, ch = parse_model(self.md, ch=[3])  # model, savelist, ch_out
+        if nc:
+            self.md['nc'] = nc  # override yaml value
+        self.model, self.save, ch = parse_model(self.md, ch=[ch])  # model, savelist, ch_out
         # print([x.shape for x in self.forward(torch.zeros(1, 3, 64, 64))])
 
         # Build strides, anchors
@@ -123,6 +128,11 @@ class Model(nn.Module):
             b = self.model[f].bias.detach().view(m.na, -1).T  # conv.bias(255) to (3,85)
             print(('%g Conv2d.bias:' + '%10.3g' * 6) % (f, *b[:5].mean(1).tolist(), b[5:].mean()))
 
+    # def _print_weights(self):
+    #     for m in self.model.modules():
+    #         if type(m) is Bottleneck:
+    #             print('%10.3g' % (m.w.detach().sigmoid() * 2))  # shortcut weights
+
     def fuse(self):  # fuse model Conv2d() + BatchNorm2d() layers
         print('Fusing layers...')
         for m in self.model.modules():
@@ -149,7 +159,7 @@ def parse_model(md, ch):  # model_dict, input_channels(3)
                 pass
 
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
-        if m in [nn.Conv2d, Conv, Bottleneck, SPP, DWConv, MixConv2d, Focus, ConvPlus, BottleneckCSP, BottleneckLight]:
+        if m in [nn.Conv2d, Conv, Bottleneck, SPP, DWConv, MixConv2d, Focus, ConvPlus, BottleneckCSP]:
             c1, c2 = ch[f], args[0]
 
             # Normal
@@ -176,9 +186,7 @@ def parse_model(md, ch):  # model_dict, input_channels(3)
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
         elif m is Concat:
-            c2 = sum([ch[x] for x in f])
-        elif m is Origami:
-            c2 = ch[f] * 5
+            c2 = sum([ch[-1 if x == -1 else x + 1] for x in f])
         elif m is Detect:
             f = f or list(reversed([(-1 if j == i else j - 1) for j, x in enumerate(ch) if x == no]))
         else:
