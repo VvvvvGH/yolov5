@@ -62,7 +62,6 @@ def detect(save_img=False):
         # Inference
         t1 = torch_utils.time_synchronized()
         pred = model(img, augment=opt.augment)[0]
-        t2 = torch_utils.time_synchronized()
 
         # to float
         if half:
@@ -71,6 +70,7 @@ def detect(save_img=False):
         # Apply NMS
         pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres,
                                    fast=True, classes=opt.classes, agnostic=opt.agnostic_nms)
+        t2 = torch_utils.time_synchronized()
 
         # Apply Classifier
         if classify:
@@ -157,6 +157,7 @@ if __name__ == '__main__':
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--no-label', action='store_true', help='no label')
     opt = parser.parse_args()
+    opt.img_size = check_img_size(opt.img_size)
     print(opt)
 
     with torch.no_grad():

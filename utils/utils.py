@@ -38,11 +38,31 @@ def init_seeds(seed=0):
 
 
 def check_git_status():
+    # Suggest 'git pull' if repo is out of date
     if platform in ['linux', 'darwin']:
-        # Suggest 'git pull' if repo is out of date
         s = subprocess.check_output('if [ -d .git ]; then git fetch && git status -uno; fi', shell=True).decode('utf-8')
         if 'Your branch is behind' in s:
             print(s[s.find('Your branch is behind'):s.find('\n\n')] + '\n')
+
+
+def check_img_size(img_size, s=32):
+    # Verify img_size is a multiple of stride s
+    if img_size % s != 0:
+        print('WARNING: --img-size %g must be multiple of max stride %g' % (img_size, s))
+    return make_divisible(img_size, s)  # nearest gs-multiple
+
+
+def check_best_possible_recall(dataset, anchors, thr):
+    # Check best possible recall of dataset with current anchors
+    wh = torch.tensor(np.concatenate([l[:, 3:5] * s for s, l in zip(dataset.shapes, dataset.labels)])).float()  # wh
+    ratio = wh[:, None] / anchors.view(-1, 2).cpu()[None]  # ratio
+    m = torch.max(ratio, 1. / ratio).max(2)[0]  # max ratio
+    bpr = (m.min(1)[0] < thr).float().mean()  # best possible recall
+    mr = (m < thr).float().mean()  # match ratio
+    print(('Label width-height:' + '%10s' * 6) % ('n', 'mean', 'min', 'max', 'matching', 'recall'))
+    print(('                   ' + '%10.4g' * 6) % (wh.shape[0], wh.mean(), wh.min(), wh.max(), mr, bpr))
+    assert bpr > 0.9, 'Best possible recall %.3g (BPR) below 0.9 threshold. Training cancelled. ' \
+                      'Compute new anchors with utils.utils.kmeans_anchors() and update model before training.' % bpr
 
 
 def make_divisible(x, divisor):
@@ -338,6 +358,23 @@ class FocalLoss(nn.Module):
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
     return 1.0 - 0.5 * eps, 0.5 * eps
+
+
+class BCEBlurWithLogitsLoss(nn.Module):
+    # BCEwithLogitLoss() with reduced missing label effects.
+    def __init__(self, alpha=0.05):
+        super(BCEBlurWithLogitsLoss, self).__init__()
+        self.loss_fcn = nn.BCEWithLogitsLoss(reduction='none')  # must be nn.BCEWithLogitsLoss()
+        self.alpha = alpha
+
+    def forward(self, pred, true):
+        loss = self.loss_fcn(pred, true)
+        pred = torch.sigmoid(pred)  # prob from logits
+        dx = pred - true  # reduce only missing label effects
+        # dx = (pred - true).abs()  # reduce missing label and false label effects
+        alpha_factor = 1 - torch.exp((dx - 1) / (self.alpha + 1e-4))
+        loss *= alpha_factor
+        return loss.mean()
 
 
 def compute_loss(p, targets, model):  # predictions, targets, model
@@ -1034,7 +1071,7 @@ def plot_study_txt(f='study.txt', x=None):  # from utils.utils import *; plot_st
     ax2.plot(1E3 / np.array([209, 140, 97, 58, 35, 18]), [33.5, 39.1, 42.5, 45.9, 49., 50.5],
              'k.-', linewidth=2, markersize=8, alpha=.25, label='EfficientDet')
     ax2.set_xlim(0, 30)
-    ax2.set_ylim(23, 50)
+    ax2.set_ylim(25, 50)
     ax2.set_xlabel('GPU Latency (ms)')
     ax2.set_ylabel('COCO AP val')
     ax2.legend(loc='lower right')
