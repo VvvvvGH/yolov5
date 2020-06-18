@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torchvision
+import yaml
 from scipy.signal import butter, filtfilt
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
@@ -47,22 +48,50 @@ def check_git_status():
 
 def check_img_size(img_size, s=32):
     # Verify img_size is a multiple of stride s
-    if img_size % s != 0:
-        print('WARNING: --img-size %g must be multiple of max stride %g' % (img_size, s))
-    return make_divisible(img_size, s)  # nearest gs-multiple
+    new_size = make_divisible(img_size, s)  # ceil gs-multiple
+    if new_size != img_size:
+        print('WARNING: --img-size %g must be multiple of max stride %g, updating to %g' % (img_size, s, new_size))
+    return new_size
 
 
-def check_best_possible_recall(dataset, anchors, thr):
-    # Check best possible recall of dataset with current anchors
-    wh = torch.tensor(np.concatenate([l[:, 3:5] * s for s, l in zip(dataset.shapes, dataset.labels)])).float()  # wh
-    ratio = wh[:, None] / anchors.view(-1, 2).cpu()[None]  # ratio
-    m = torch.max(ratio, 1. / ratio).max(2)[0]  # max ratio
-    bpr = (m.min(1)[0] < thr).float().mean()  # best possible recall
-    mr = (m < thr).float().mean()  # match ratio
-    print(('Label width-height:' + '%10s' * 6) % ('n', 'mean', 'min', 'max', 'matching', 'recall'))
-    print(('                   ' + '%10.4g' * 6) % (wh.shape[0], wh.mean(), wh.min(), wh.max(), mr, bpr))
-    assert bpr > 0.9, 'Best possible recall %.3g (BPR) below 0.9 threshold. Training cancelled. ' \
-                      'Compute new anchors with utils.utils.kmeans_anchors() and update model before training.' % bpr
+def check_anchors(dataset, model, thr=4.0, imgsz=640):
+    # Check anchor fit to data, recompute if necessary
+    print('\nAnalyzing anchors... ', end='')
+    m = model.module.model[-1] if hasattr(model, 'module') else model.model[-1]  # Detect()
+    shapes = imgsz * dataset.shapes / dataset.shapes.max(1, keepdims=True)
+    wh = torch.tensor(np.concatenate([l[:, 3:5] * s for s, l in zip(shapes, dataset.labels)])).float()  # wh
+
+    def metric(k):  # compute metric
+        r = wh[:, None] / k[None]
+        x = torch.min(r, 1. / r).min(2)[0]  # ratio metric
+        best = x.max(1)[0]  # best_x
+        return (best > 1. / thr).float().mean()  #  best possible recall
+
+    bpr = metric(m.anchor_grid.clone().cpu().view(-1, 2))
+    print('Best Possible Recall (BPR) = %.4f' % bpr, end='')
+    if bpr < 0.99:  # threshold to recompute
+        print('. Attempting to generate improved anchors, please wait...' % bpr)
+        na = m.anchor_grid.numel() // 2  # number of anchors
+        new_anchors = kmean_anchors(dataset, n=na, img_size=imgsz, thr=thr, gen=1000, verbose=False)
+        new_bpr = metric(new_anchors.reshape(-1, 2))
+        if new_bpr > bpr:  # replace anchors
+            new_anchors = torch.tensor(new_anchors, device=m.anchors.device).type_as(m.anchors)
+            m.anchor_grid[:] = new_anchors.clone().view_as(m.anchor_grid)  # for inference
+            m.anchors[:] = new_anchors.clone().view_as(m.anchors) / m.stride.to(m.anchors.device).view(-1, 1, 1)  # loss
+            print('New anchors saved to model. Update model *.yaml to use these anchors in the future.')
+        else:
+            print('Original anchors better than new anchors. Proceeding with original anchors.')
+    print('')  # newline
+
+
+def check_file(file):
+    # Searches for file if not found locally
+    if os.path.isfile(file):
+        return file
+    else:
+        files = glob.glob('./**/' + file, recursive=True)  # find file
+        assert len(files), 'File Not Found: %s' % file  # assert file was found
+        return files[0]  # return first file if multiple found
 
 
 def make_divisible(x, divisor):
@@ -500,11 +529,14 @@ def build_targets(p, targets, model):
 
 
 def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, fast=False, classes=None, agnostic=False):
+    """Performs Non-Maximum Suppression (NMS) on inference results
+
+    Returns:
+         detections with shape: nx6 (x1, y1, x2, y2, conf, cls)
     """
-    Performs  Non-Maximum Suppression on inference results
-    Returns detections with shape:
-        nx6 (x1, y1, x2, y2, conf, cls)
-    """
+    if prediction.dtype is torch.float16:
+        prediction = prediction.float()  # to FP32
+
     nc = prediction[0].shape[1] - 5  # number of classes
     xc = prediction[..., 4] > conf_thres  # candidates
 
@@ -514,12 +546,11 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, fast=False, c
     time_limit = 10.0  # seconds to quit after
     redundant = True  # require redundant detections
     fast |= conf_thres > 0.001  # fast mode
+    multi_label = nc > 1  # multiple labels per box (adds 0.5ms/img)
     if fast:
         merge = False
-        multi_label = False
     else:
         merge = True  # merge for best mAP (adds 0.5ms/img)
-        multi_label = nc > 1  # multiple labels per box (adds 0.5ms/img)
 
     t = time.time()
     output = [None] * prediction.shape[0]
@@ -590,6 +621,7 @@ def strip_optimizer(f='weights/best.pt'):  # from utils.utils import *; strip_op
     # Strip optimizer from *.pt files for lighter files (reduced by 1/2 size)
     x = torch.load(f, map_location=torch.device('cpu'))
     x['optimizer'] = None
+    x['model'].half()  # to FP16
     torch.save(x, f)
     print('Optimizer stripped from %s' % f)
 
@@ -597,13 +629,12 @@ def strip_optimizer(f='weights/best.pt'):  # from utils.utils import *; strip_op
 def create_backbone(f='weights/best.pt', s='weights/backbone.pt'):  # from utils.utils import *; create_backbone()
     # create backbone 's' from 'f'
     device = torch.device('cpu')
-    x = torch.load(f, map_location=device)
-    torch.save(x, s)  # update model if SourceChangeWarning
     x = torch.load(s, map_location=device)
 
     x['optimizer'] = None
     x['training_results'] = None
     x['epoch'] = -1
+    x['model'].half()  # to FP16
     for p in x['model'].parameters():
         p.requires_grad = True
     torch.save(x, s)
@@ -675,55 +706,63 @@ def coco_single_class_labels(path='../coco/labels/train2014/', label_class=43):
             shutil.copyfile(src=img_file, dst='new/images/' + Path(file).name.replace('txt', 'jpg'))  # copy images
 
 
-def kmean_anchors(path='./data/coco128.txt', n=9, img_size=(640, 640), thr=0.20, gen=1000):
-    # Creates kmeans anchors for use in *.cfg files: from utils.utils import *; _ = kmean_anchors()
-    # n: number of anchors
-    # img_size: (min, max) image size used for multi-scale training (can be same values)
-    # thr: IoU threshold hyperparameter used for training (0.0 - 1.0)
-    # gen: generations to evolve anchors using genetic algorithm
-    from utils.datasets import LoadImagesAndLabels
+def kmean_anchors(path='./data/coco128.yaml', n=9, img_size=640, thr=4.0, gen=1000, verbose=True):
+    """ Creates kmeans-evolved anchors from training dataset
+
+        Arguments:
+            path: path to dataset *.yaml, or a loaded dataset
+            n: number of anchors
+            img_size: image size used for training
+            thr: anchor-label wh ratio threshold hyperparameter hyp['anchor_t'] used for training, default=4.0
+            gen: generations to evolve anchors using genetic algorithm
+
+        Return:
+            k: kmeans evolved anchors
+
+        Usage:
+            from utils.utils import *; _ = kmean_anchors()
+    """
+    thr = 1. / thr
+
+    def metric(k, wh):  # compute metrics
+        r = wh[:, None] / k[None]
+        x = torch.min(r, 1. / r).min(2)[0]  # ratio metric
+        # x = wh_iou(wh, torch.tensor(k))  # iou metric
+        return x, x.max(1)[0]  # x, best_x
+
+    def fitness(k):  # mutation fitness
+        _, best = metric(torch.tensor(k, dtype=torch.float32), wh)
+        return (best * (best > thr).float()).mean()  # fitness
 
     def print_results(k):
         k = k[np.argsort(k.prod(1))]  # sort small to large
-        iou = wh_iou(wh, torch.Tensor(k))
-        max_iou = iou.max(1)[0]
-        bpr, aat = (max_iou > thr).float().mean(), (iou > thr).float().mean() * n  # best possible recall, anch > thr
-
-        # thr = 5.0
-        # r = wh[:, None] / k[None]
-        # ar = torch.max(r, 1. / r).max(2)[0]
-        # max_ar = ar.min(1)[0]
-        # bpr, aat = (max_ar < thr).float().mean(), (ar < thr).float().mean() * n  # best possible recall, anch > thr
-
-        print('%.2f iou_thr: %.3f best possible recall, %.2f anchors > thr' % (thr, bpr, aat))
-        print('n=%g, img_size=%s, IoU_all=%.3f/%.3f-mean/best, IoU>thr=%.3f-mean: ' %
-              (n, img_size, iou.mean(), max_iou.mean(), iou[iou > thr].mean()), end='')
+        x, best = metric(k, wh0)
+        bpr, aat = (best > thr).float().mean(), (x > thr).float().mean() * n  # best possible recall, anch > thr
+        print('thr=%.2f: %.4f best possible recall, %.2f anchors past thr' % (thr, bpr, aat))
+        print('n=%g, img_size=%s, metric_all=%.3f/%.3f-mean/best, past_thr=%.3f-mean: ' %
+              (n, img_size, x.mean(), best.mean(), x[x > thr].mean()), end='')
         for i, x in enumerate(k):
             print('%i,%i' % (round(x[0]), round(x[1])), end=',  ' if i < len(k) - 1 else '\n')  # use in *.cfg
         return k
 
-    def fitness(k):  # mutation fitness
-        iou = wh_iou(wh, torch.Tensor(k))  # iou
-        max_iou = iou.max(1)[0]
-        return (max_iou * (max_iou > thr).float()).mean()  # product
-
-    # def fitness_ratio(k):  # mutation fitness
-    #     # wh(5316,2), k(9,2)
-    #     r = wh[:, None] / k[None]
-    #     x = torch.max(r, 1. / r).max(2)[0]
-    #     m = x.min(1)[0]
-    #     return 1. / (m * (m < 5).float()).mean()  # product
+    if isinstance(path, str):  # *.yaml file
+        with open(path) as f:
+            data_dict = yaml.load(f, Loader=yaml.FullLoader)  # model dict
+        from utils.datasets import LoadImagesAndLabels
+        dataset = LoadImagesAndLabels(data_dict['train'], augment=True, rect=True)
+    else:
+        dataset = path  # dataset
 
     # Get label wh
-    wh = []
-    dataset = LoadImagesAndLabels(path, augment=True, rect=True)
-    nr = 1 if img_size[0] == img_size[1] else 3  # number augmentation repetitions
-    for s, l in zip(dataset.shapes, dataset.labels):
-        # wh.append(l[:, 3:5] * (s / s.max()))  # image normalized to letterbox normalized wh
-        wh.append(l[:, 3:5] * s)  # image normalized to pixels
-    wh = np.concatenate(wh, 0).repeat(nr, axis=0)  # augment 3x
-    # wh *= np.random.uniform(img_size[0], img_size[1], size=(wh.shape[0], 1))  # normalized to pixels (multi-scale)
-    wh = wh[(wh > 2.0).all(1)]  # remove below threshold boxes (< 2 pixels wh)
+    shapes = img_size * dataset.shapes / dataset.shapes.max(1, keepdims=True)
+    wh0 = np.concatenate([l[:, 3:5] * s for s, l in zip(shapes, dataset.labels)])  # wh
+
+    # Filter
+    i = (wh0 < 4.0).any(1).sum()
+    if i:
+        print('WARNING: Extremely small objects found. '
+              '%g of %g labels are < 4 pixels in width or height.' % (i, len(wh0)))
+    wh = wh0[(wh0 >= 4.0).any(1)]  # filter > 2 pixels
 
     # Kmeans calculation
     from scipy.cluster.vq import kmeans
@@ -731,10 +770,11 @@ def kmean_anchors(path='./data/coco128.txt', n=9, img_size=(640, 640), thr=0.20,
     s = wh.std(0)  # sigmas for whitening
     k, dist = kmeans(wh / s, n, iter=30)  # points, mean distance
     k *= s
-    wh = torch.Tensor(wh)
+    wh = torch.tensor(wh, dtype=torch.float32)  # filtered
+    wh0 = torch.tensor(wh0, dtype=torch.float32)  # unflitered
     k = print_results(k)
 
-    # # Plot
+    # Plot
     # k, d = [None] * 20, [None] * 20
     # for i in tqdm(range(1, 21)):
     #     k[i-1], d[i-1] = kmeans(wh / s, i)  # points, mean distance
@@ -750,7 +790,8 @@ def kmean_anchors(path='./data/coco128.txt', n=9, img_size=(640, 640), thr=0.20,
     # Evolve
     npr = np.random
     f, sh, mp, s = fitness(k), k.shape, 0.9, 0.1  # fitness, generations, mutation prob, sigma
-    for _ in tqdm(range(gen), desc='Evolving anchors'):
+    pbar = tqdm(range(gen), desc='Evolving anchors with Genetic Algorithm')  # progress bar
+    for _ in pbar:
         v = np.ones(sh)
         while (v == 1).all():  # mutate until a change occurs (prevent duplicates)
             v = ((npr.random(sh) < mp) * npr.random() * npr.randn(*sh) * s + 1).clip(0.3, 3.0)
@@ -758,10 +799,11 @@ def kmean_anchors(path='./data/coco128.txt', n=9, img_size=(640, 640), thr=0.20,
         fg = fitness(kg)
         if fg > f:
             f, k = fg, kg.copy()
-            print_results(k)
-    k = print_results(k)
+            pbar.desc = 'Evolving anchors with Genetic Algorithm: fitness = %.4f' % f
+            if verbose:
+                print_results(k)
 
-    return k
+    return print_results(k)
 
 
 def print_mutation(hyp, results, bucket=''):
@@ -927,7 +969,7 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
         return None
 
     if isinstance(images, torch.Tensor):
-        images = images.cpu().numpy()
+        images = images.cpu().float().numpy()
 
     if isinstance(targets, torch.Tensor):
         targets = targets.cpu().numpy()
@@ -1102,6 +1144,7 @@ def plot_labels(labels):
     ax[2].set_xlabel('width')
     ax[2].set_ylabel('height')
     plt.savefig('labels.png', dpi=200)
+    plt.close()
 
 
 def plot_evolution_results(hyp):  # from utils.utils import *; plot_evolution_results(hyp)
