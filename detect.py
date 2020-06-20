@@ -1,5 +1,7 @@
 import argparse
 
+import torch.backends.cudnn as cudnn
+
 from utils.datasets import *
 from utils.utils import *
 
