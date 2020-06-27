@@ -54,7 +54,7 @@ if hyp['fl_gamma']:
     print('Using FocalLoss(gamma=%g)' % hyp['fl_gamma'])
 
 
-def train(hyp):
+def train(hyp,dataset=None):
     epochs = opt.epochs  # 300
     batch_size = opt.batch_size  # 64
     weights = opt.weights  # initial training weights
@@ -151,7 +151,8 @@ def train(hyp):
         # pip install torch==1.4.0+cu100 torchvision==0.5.0+cu100 -f https://download.pytorch.org/whl/torch_stable.html
 
     # Dataset
-    dataset = LoadImagesAndLabels(train_path, imgsz, batch_size,
+    if not dataset:
+        dataset = LoadImagesAndLabels(train_path, imgsz, batch_size,
                                   augment=True,
                                   hyp=hyp,  # augmentation hyperparameters
                                   rect=opt.rect,  # rectangular training
@@ -359,7 +360,7 @@ def train(hyp):
     print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
     dist.destroy_process_group() if device.type != 'cpu' and torch.cuda.device_count() > 1 else None
     torch.cuda.empty_cache()
-    return results
+    return results, dataset
 
 
 if __name__ == '__main__':
@@ -416,7 +417,9 @@ if __name__ == '__main__':
         if opt.bucket:
             os.system('gsutil cp gs://%s/evolve.txt .' % opt.bucket)  # download evolve.txt if exists
 
-        for _ in range(10):  # generations to evolve
+        dataset = None
+
+        for _ in range(50):  # generations to evolve
             if os.path.exists('evolve.txt'):  # if evolve.txt exists: select best hyps and mutate
                 # Select parent(s)
                 parent = 'single'  # parent selection method: 'single' or 'weighted'
@@ -449,7 +452,8 @@ if __name__ == '__main__':
                 hyp[k] = np.clip(hyp[k], v[0], v[1])
 
             # Train mutation
-            results = train(hyp.copy())
+            results, ds = train(hyp.copy(),dataset)
+            dataset = ds
 
             # Write mutation results
             print_mutation(hyp, results, opt.bucket)
