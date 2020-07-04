@@ -25,6 +25,7 @@ def detect(save_img=False):
     # torch.save(torch.load(weights, map_location=device), weights)  # update model if SourceChangeWarning
     # model.fuse()
     model.to(device).eval()
+    imgsz = check_img_size(imgsz, s=model.model[-1].stride.max())  # check img_size
     if half:
         model.half()  # to FP16
 
@@ -153,13 +154,12 @@ if __name__ == '__main__':
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--no-label', action='store_true', help='no label')
     opt = parser.parse_args()
-    opt.img_size = check_img_size(opt.img_size)
     print(opt)
 
     with torch.no_grad():
         detect()
 
-        # Update all models
+        # # Update all models
         # for opt.weights in ['yolov5s.pt', 'yolov5m.pt', 'yolov5l.pt', 'yolov5x.pt', 'yolov3-spp.pt']:
-        #    detect()
-        #    create_pretrained(opt.weights, opt.weights)
+        #     detect()
+        #     create_pretrained(opt.weights, opt.weights)

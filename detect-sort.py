@@ -117,7 +117,7 @@ def detect(save_img=False):
 
                 for det in track_bbs_ids:
                     label = '%s ' % (det[4])
-                    plot_one_box(det, im0, label=None, color=colors[int(det[4] % len(colors))], line_thickness=3)
+                    plot_one_box(det, im0, label=label, color=colors[int(det[4] % len(colors))], line_thickness=3)
             else:
                 mot_tracker.update()
             # Print time (inference + NMS)
