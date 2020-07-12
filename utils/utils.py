@@ -38,9 +38,15 @@ def init_seeds(seed=0):
     torch_utils.init_seeds(seed=seed)
 
 
+def get_latest_run(search_dir='./runs'):
+    # Return path to most recent 'last.pt' in /runs (i.e. to --resume from)
+    last_list = glob.glob(f'{search_dir}/**/last*.pt', recursive=True)
+    return max(last_list, key=os.path.getctime)
+
+
 def check_git_status():
     # Suggest 'git pull' if repo is out of date
-    if platform in ['linux', 'darwin']:
+    if platform in ['linux', 'darwin'] and not os.path.isfile('/.dockerenv'):
         s = subprocess.check_output('if [ -d .git ]; then git fetch && git status -uno; fi', shell=True).decode('utf-8')
         if 'Your branch is behind' in s:
             print(s[s.find('Your branch is behind'):s.find('\n\n')] + '\n')
@@ -631,14 +637,12 @@ def strip_optimizer(f='weights/best.pt'):  # from utils.utils import *; strip_op
     x['optimizer'] = None
     x['model'].half()  # to FP16
     torch.save(x, f)
-    print('Optimizer stripped from %s' % f)
+    print('Optimizer stripped from %s, %.1fMB' % (f, os.path.getsize(f) / 1E6))
 
 
 def create_pretrained(f='weights/best.pt', s='weights/pretrained.pt'):  # from utils.utils import *; create_pretrained()
     # create pretrained checkpoint 's' from 'f' (create_pretrained(x, x) for x in glob.glob('./*.pt'))
-    device = torch.device('cpu')
-    x = torch.load(s, map_location=device)
-
+    x = torch.load(f, map_location=torch.device('cpu'))
     x['optimizer'] = None
     x['training_results'] = None
     x['epoch'] = -1
@@ -646,7 +650,7 @@ def create_pretrained(f='weights/best.pt', s='weights/pretrained.pt'):  # from u
     for p in x['model'].parameters():
         p.requires_grad = True
     torch.save(x, s)
-    print('%s saved as pretrained checkpoint %s' % (f, s))
+    print('%s saved as pretrained checkpoint %s, %.1fMB' % (f, s, os.path.getsize(s) / 1E6))
 
 
 def coco_class_count(path='../coco/labels/train2014/'):
@@ -899,6 +903,16 @@ def output_to_target(output, width, height):
     return np.array(targets)
 
 
+def increment_dir(dir, comment=''):
+    # Increments a directory runs/exp1 --> runs/exp2_comment
+    n = 0  # number
+    d = sorted(glob.glob(dir + '*'))  # directories
+    if len(d):
+        d = d[-1].replace(dir, '')
+        n = int(d[:d.find('_')] if '_' in d else d) + 1  # increment
+    return dir + str(n) + ('_' + comment if comment else '')
+
+
 # Plotting functions ---------------------------------------------------------------------------------------------------
 def butter_lowpass_filtfilt(data, cutoff=1500, fs=50000, order=5):
     # https://stackoverflow.com/questions/28536191/how-to-filter-smooth-with-scipy-numpy
@@ -1053,7 +1067,7 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
     return mosaic
 
 
-def plot_lr_scheduler(optimizer, scheduler, epochs=300):
+def plot_lr_scheduler(optimizer, scheduler, epochs=300, save_dir=''):
     # Plot LR simulating training for full epochs
     optimizer, scheduler = copy(optimizer), copy(scheduler)  # do not modify originals
     y = []
@@ -1067,7 +1081,7 @@ def plot_lr_scheduler(optimizer, scheduler, epochs=300):
     plt.xlim(0, epochs)
     plt.ylim(0)
     plt.tight_layout()
-    plt.savefig('LR.png', dpi=200)
+    plt.savefig(Path(save_dir) / 'LR.png', dpi=200)
 
 
 def plot_test_txt():  # from utils.utils import *; plot_test()
@@ -1132,7 +1146,7 @@ def plot_study_txt(f='study.txt', x=None):  # from utils.utils import *; plot_st
     plt.savefig(f.replace('.txt', '.png'), dpi=200)
 
 
-def plot_labels(labels):
+def plot_labels(labels, save_dir=''):
     # plot dataset labels
     c, b = labels[:, 0], labels[:, 1:].transpose()  # classees, boxes
 
@@ -1153,7 +1167,7 @@ def plot_labels(labels):
     ax[2].scatter(b[2], b[3], c=hist2d(b[2], b[3], 90), cmap='jet')
     ax[2].set_xlabel('width')
     ax[2].set_ylabel('height')
-    plt.savefig('labels.png', dpi=200)
+    plt.savefig(Path(save_dir) / 'labels.png', dpi=200)
     plt.close()
 
 
@@ -1199,7 +1213,8 @@ def plot_results_overlay(start=0, stop=0):  # from utils.utils import *; plot_re
         fig.savefig(f.replace('.txt', '.png'), dpi=200)
 
 
-def plot_results(start=0, stop=0, bucket='', id=(), labels=()):  # from utils.utils import *; plot_results()
+def plot_results(start=0, stop=0, bucket='', id=(), labels=(),
+                 save_dir=''):  # from utils.utils import *; plot_results()
     # Plot training 'results*.txt' as seen in https://github.com/ultralytics/yolov5#reproduce-our-training
     fig, ax = plt.subplots(2, 5, figsize=(12, 6))
     ax = ax.ravel()
@@ -1209,7 +1224,7 @@ def plot_results(start=0, stop=0, bucket='', id=(), labels=()):  # from utils.ut
         os.system('rm -rf storage.googleapis.com')
         files = ['https://storage.googleapis.com/%s/results%g.txt' % (bucket, x) for x in id]
     else:
-        files = glob.glob('results*.txt') + glob.glob('../../Downloads/results*.txt')
+        files = glob.glob(str(Path(save_dir) / 'results*.txt')) + glob.glob('../../Downloads/results*.txt')
     for fi, f in enumerate(files):
         try:
             results = np.loadtxt(f, usecols=[2, 3, 4, 8, 9, 12, 13, 14, 10, 11], ndmin=2).T
@@ -1230,4 +1245,4 @@ def plot_results(start=0, stop=0, bucket='', id=(), labels=()):  # from utils.ut
 
     fig.tight_layout()
     ax[1].legend()
-    fig.savefig('results.png', dpi=200)
+    fig.savefig(Path(save_dir) / 'results.png', dpi=200)
