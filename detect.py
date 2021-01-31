@@ -2,6 +2,7 @@ import argparse
 import time
 from pathlib import Path
 
+import os
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -117,7 +118,12 @@ def detect(save_img=False):
 
             # Stream results
             if view_img:
-                cv2.imshow(str(p), im0)
+                cv2.imshow(os.path.basename(p), im0)
+                # print("Wait key")
+                # # check for 'q' key if pressed
+                key = cv2.waitKey(1) & 0xFF
+                # if key == ord("q"):
+                #     break
 
             # Save results (image with detections)
             if save_img:
